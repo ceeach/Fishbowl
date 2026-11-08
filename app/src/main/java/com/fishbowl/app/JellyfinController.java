@@ -846,11 +846,13 @@ public class JellyfinController {
             // Phase 14: LD_LIBRARY_PATH must include $PREFIX/lib for native libs
             // (e_sqlite3.so, libSkiaSharp.so, etc.) and $PREFIX/opt/jellyfin/lib
             // for ffmpeg shared libraries (libavdevice, libavcodec, etc.)
+            // as well as the app's nativeLibraryDir for bundled native libraries
             String libDir = new File(prefixDir, "lib").getAbsolutePath();
             String ffmpegLibDir = new File(prefixDir, "opt/jellyfin/lib").getAbsolutePath();
+            String nativeLibDir = (ctx != null) ? ctx.getApplicationInfo().nativeLibraryDir : null;
             String existingLdPath = env.getOrDefault("LD_LIBRARY_PATH", "");
-            env.put("LD_LIBRARY_PATH", libDir + ":" + ffmpegLibDir
-                    + (existingLdPath.isEmpty() ? "" : ":" + existingLdPath));
+            String ldPath = libDir + ":" + ffmpegLibDir + (nativeLibDir != null && !nativeLibDir.isEmpty() ? ":" + nativeLibDir : "");
+            env.put("LD_LIBRARY_PATH", ldPath + (existingLdPath.isEmpty() ? "" : ":" + existingLdPath));
 
             // SSL CA Certificate bundle for .NET SslStream outbound HTTPS connections (TMDb, OMDb, etc.)
             File certFile = new File(prefixDir, "etc/tls/cert.pem");
@@ -868,8 +870,10 @@ public class JellyfinController {
             env.put("DOTNET_gcServer", "0");
             env.put("DOTNET_gcConcurrent", "1");
             env.put("DOTNET_GCHighMemPercent", "80");
-            env.put("DOTNET_ThreadPool_MinThreads", "2");
-            env.put("DOTNET_ThreadPool_MaxThreads", "24");
+            env.put("DOTNET_ThreadPool_MinThreads", "4");
+            env.put("DOTNET_ThreadPool_MaxThreads", "64");
+            env.put("DOTNET_DefaultStackSize", "200000"); // 0x200000 = 2MB (hex)
+            env.put("COMPlus_DefaultStackSize", "200000");
             env.put("DOTNET_EnableWriteXorExecute", "0");
 
             // §2: Merge stdout+stderr to prevent blocked pipe

@@ -1128,16 +1128,16 @@ public class MediaServiceManager {
                 }
                 if ("radarr".equalsIgnoreCase(id)) {
                     env.put("RADARR__SERVER__ALLOWEDHOSTS", "*");
-                    env.put("RADARR__SERVER__TRUSTEDNETWORKS", "0.0.0.0/0,::/0");
+                    env.put("RADARR__SERVER__TRUSTEDNETWORKS", "127.0.0.1/32,::1/128,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12");
                 } else if ("sonarr".equalsIgnoreCase(id)) {
                     env.put("SONARR__SERVER__ALLOWEDHOSTS", "*");
-                    env.put("SONARR__SERVER__TRUSTEDNETWORKS", "0.0.0.0/0,::/0");
+                    env.put("SONARR__SERVER__TRUSTEDNETWORKS", "127.0.0.1/32,::1/128,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12");
                 } else if ("prowlarr".equalsIgnoreCase(id)) {
                     env.put("PROWLARR__SERVER__ALLOWEDHOSTS", "*");
-                    env.put("PROWLARR__SERVER__TRUSTEDNETWORKS", "0.0.0.0/0,::/0");
+                    env.put("PROWLARR__SERVER__TRUSTEDNETWORKS", "127.0.0.1/32,::1/128,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12");
                 } else if ("lidarr".equalsIgnoreCase(id)) {
                     env.put("LIDARR__SERVER__ALLOWEDHOSTS", "*");
-                    env.put("LIDARR__SERVER__TRUSTEDNETWORKS", "0.0.0.0/0,::/0");
+                    env.put("LIDARR__SERVER__TRUSTEDNETWORKS", "127.0.0.1/32,::1/128,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12");
                 } else if ("jackett".equalsIgnoreCase(id)) {
                     env.put("JACKETT_PORT", String.valueOf(port));
                     env.put("JACKETT_DATA_FOLDER", dataDir.getAbsolutePath());
@@ -1151,8 +1151,10 @@ public class MediaServiceManager {
                 env.put("DOTNET_gcServer", "0");
                 env.put("DOTNET_gcConcurrent", "1");
                 env.put("DOTNET_GCHighMemPercent", "75");
-                env.put("DOTNET_ThreadPool_MinThreads", "2");
-                env.put("DOTNET_ThreadPool_MaxThreads", "20");
+                env.put("DOTNET_ThreadPool_MinThreads", "4");
+                env.put("DOTNET_ThreadPool_MaxThreads", "64");
+                env.put("DOTNET_DefaultStackSize", "200000"); // 0x200000 = 2MB (hex)
+                env.put("COMPlus_DefaultStackSize", "200000");
                 env.put("DOTNET_EnableWriteXorExecute", "0");
 
                 String nativeLibDir = appContext.getApplicationInfo().nativeLibraryDir;
@@ -1998,9 +2000,19 @@ public class MediaServiceManager {
                 try { android.system.Os.chmod(targetEsqlite.getAbsolutePath(), 0755); } catch (Throwable ignored) {}
             }
 
-            // 4. Ensure Bionic libMonoPosixHelper.so is present from prefix/lib or directly from assets
+            // 4. Ensure Bionic libMonoPosixHelper.so is present from nativeLibraryDir, prefix/lib, or assets
+            File nativeMono = new File(appContext.getApplicationInfo().nativeLibraryDir, "libMonoPosixHelper.so");
             File prefixMono = new File(TermuxConstants.TERMUX_PREFIX_DIR, "lib/libMonoPosixHelper.so");
-            if (!prefixMono.exists()) {
+            File prefixNoLibMono = new File(TermuxConstants.TERMUX_PREFIX_DIR, "lib/MonoPosixHelper.so");
+            File targetMono = new File(parent, "libMonoPosixHelper.so");
+            File targetNoLibMono = new File(parent, "MonoPosixHelper.so");
+
+            // Overwrite existing files to ensure any outdated/unpatched library on device is replaced
+            if (nativeMono.exists()) {
+                copyFile(nativeMono, prefixMono);
+                copyFile(nativeMono, targetMono);
+                copyFile(nativeMono, targetNoLibMono);
+            } else {
                 try (InputStream in = appContext.getAssets().open("libMonoPosixHelper.so");
                      FileOutputStream out = new FileOutputStream(prefixMono)) {
                     byte[] buf = new byte[8192];
@@ -2008,18 +2020,40 @@ public class MediaServiceManager {
                     while ((r = in.read(buf)) != -1) out.write(buf, 0, r);
                 } catch (Throwable ignored) {}
                 if (prefixMono.exists()) {
-                    try { android.system.Os.chmod(prefixMono.getAbsolutePath(), 0755); } catch (Throwable ignored) {}
+                    copyFile(prefixMono, targetMono);
+                    copyFile(prefixMono, targetNoLibMono);
                 }
             }
-            File targetMono = new File(parent, "libMonoPosixHelper.so");
-            if (prefixMono.exists() && (!targetMono.exists() || targetMono.length() != prefixMono.length())) {
-                copyFile(prefixMono, targetMono);
+
+            if (prefixMono.exists()) {
+                try { android.system.Os.chmod(prefixMono.getAbsolutePath(), 0755); } catch (Throwable ignored) {}
+            }
+            if (prefixNoLibMono.exists()) {
+                try { android.system.Os.chmod(prefixNoLibMono.getAbsolutePath(), 0755); } catch (Throwable ignored) {}
             }
             if (targetMono.exists()) {
                 targetMono.setReadable(true, false);
                 targetMono.setExecutable(true, false);
                 try { android.system.Os.chmod(targetMono.getAbsolutePath(), 0755); } catch (Throwable ignored) {}
             }
+            if (targetNoLibMono.exists()) {
+                targetNoLibMono.setReadable(true, false);
+                targetNoLibMono.setExecutable(true, false);
+                try { android.system.Os.chmod(targetNoLibMono.getAbsolutePath(), 0755); } catch (Throwable ignored) {}
+            }
+
+            // Ensure Android system libz.so is symlinked into prefix/lib for zlib resolution
+            try {
+                File prefixLibZ = new File(TermuxConstants.TERMUX_PREFIX_DIR, "lib/libz.so");
+                File prefixLibZ1 = new File(TermuxConstants.TERMUX_PREFIX_DIR, "lib/libz.so.1");
+                File systemLibZ = new File("/system/lib64/libz.so");
+                if (!prefixLibZ.exists() && systemLibZ.exists()) {
+                    android.system.Os.symlink(systemLibZ.getAbsolutePath(), prefixLibZ.getAbsolutePath());
+                }
+                if (!prefixLibZ1.exists() && prefixLibZ.exists()) {
+                    android.system.Os.symlink(prefixLibZ.getAbsolutePath(), prefixLibZ1.getAbsolutePath());
+                }
+            } catch (Throwable ignored) {}
 
             // 5. Ensure runtimeconfig uses net10.0 and Bionic frameworks
             File jfConfig = new File(TermuxConstants.TERMUX_PREFIX_DIR, "lib/jellyfin/jellyfin.runtimeconfig.json");
@@ -2042,6 +2076,9 @@ public class MediaServiceManager {
                         "    ],\n" +
                         "    \"configProperties\": {\n" +
                         "      \"System.GC.Server\": false,\n" +
+                        "      \"System.Threading.DefaultStackSize\": 2097152,\n" +
+                        "      \"System.Threading.ThreadPool.MinThreads\": 4,\n" +
+                        "      \"System.Threading.ThreadPool.MaxThreads\": 64,\n" +
                         "      \"System.Reflection.Metadata.MetadataUpdater.IsSupported\": false,\n" +
                         "      \"System.Reflection.NullabilityInfoContext.IsSupported\": true,\n" +
                         "      \"System.Runtime.Serialization.EnableUnsafeBinaryFormatterSerialization\": false\n" +
@@ -2052,6 +2089,8 @@ public class MediaServiceManager {
                     fos.write(minimalConfig.getBytes(StandardCharsets.UTF_8));
                 }
             }
+
+            healServarrDatabase(baseName);
 
             // 6. Pre-create or sanitize config.xml (BindAddress 0.0.0.0 and Auth None for local Web UI)
             File configDir = new File(TermuxConstants.TERMUX_HOME_DIR, ".config/" + baseName);
@@ -2107,11 +2146,12 @@ public class MediaServiceManager {
             }
 
             // 2. Deploy wrapper script for ffprobe and ffmpeg
+            String nativeLibDir = appContext.getApplicationInfo().nativeLibraryDir;
             String[] bins = {"ffprobe", "ffmpeg"};
             for (String b : bins) {
                 File realBin = new File(jfOptBin, b);
                 String scriptContent = "#!/system/bin/sh\n" +
-                        "export LD_LIBRARY_PATH=" + jfOptLib.getAbsolutePath() + ":" + prefixLib.getAbsolutePath() + ":$LD_LIBRARY_PATH\n" +
+                        "export LD_LIBRARY_PATH=" + jfOptLib.getAbsolutePath() + ":" + prefixLib.getAbsolutePath() + ":" + nativeLibDir + ":$LD_LIBRARY_PATH\n" +
                         "exec " + realBin.getAbsolutePath() + " \"$@\"\n";
 
                 File wrapperBin = new File(prefixBin, b);
@@ -2212,6 +2252,7 @@ public class MediaServiceManager {
         else if ("prowlarr".equalsIgnoreCase(serviceId)) { baseName = "Prowlarr"; port = 9696; }
         else if ("lidarr".equalsIgnoreCase(serviceId)) { baseName = "Lidarr"; port = 8686; }
         if (baseName != null) {
+            healServarrDatabase(baseName);
             File configDir = new File(TermuxConstants.TERMUX_HOME_DIR, ".config/" + baseName);
             if (!configDir.exists()) configDir.mkdirs();
             File configXml = new File(configDir, "config.xml");
@@ -2465,13 +2506,43 @@ public class MediaServiceManager {
     }
 
     private void preSeedPopularJackettIndexers(File indexersDir) {
+        // Mirror torrentgalaxyclone.yml to torrentgalaxy.yml in Definitions for complete backwards-compatibility
+        try {
+            File defDir = new File(TermuxConstants.TERMUX_HOME_DIR, "services/jackett/Definitions");
+            if (defDir.exists() && defDir.isDirectory()) {
+                File cloneDef = new File(defDir, "torrentgalaxyclone.yml");
+                File tgDef = new File(defDir, "torrentgalaxy.yml");
+                if (cloneDef.exists() && !tgDef.exists()) {
+                    copyFile(cloneDef, tgDef);
+                    Log.i(TAG, "[Jackett] Mirrored torrentgalaxyclone.yml to torrentgalaxy.yml");
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        // Purge obsolete torrentgalaxy definition causing Jackett HTTP 500 'Unknown indexer'
+        File badTg = new File(indexersDir, "torrentgalaxy.json");
+        if (badTg.exists()) badTg.delete();
+
+        // Ensure limetorrents uses www. to prevent Cardigann 301/302 domain redirect exception
+        File ltFile = new File(indexersDir, "limetorrents.json");
+        if (ltFile.exists()) {
+            try {
+                byte[] bytes = java.nio.file.Files.readAllBytes(ltFile.toPath());
+                String ltJson = new String(bytes, StandardCharsets.UTF_8);
+                if (ltJson.contains("https://limetorrents.lol/") && !ltJson.contains("https://www.limetorrents.lol/")) {
+                    ltJson = ltJson.replace("https://limetorrents.lol/", "https://www.limetorrents.lol/");
+                    java.nio.file.Files.write(ltFile.toPath(), ltJson.getBytes(StandardCharsets.UTF_8));
+                }
+            } catch (Throwable ignored) {}
+        }
+
         String[][] trackers = {
             {"1337x", "https://1337x.to/"},
             {"yts", "https://yts.mx/"},
             {"thepiratebay", "https://thepiratebay.org/"},
             {"eztv", "https://eztv.re/"},
-            {"torrentgalaxy", "https://torrentgalaxy.to/"},
-            {"limetorrents", "https://limetorrents.lol/"}
+            {"torrentgalaxyclone", "https://torrentgalaxy.to/"},
+            {"limetorrents", "https://www.limetorrents.lol/"}
         };
         for (String[] tracker : trackers) {
             File idxFile = new File(indexersDir, tracker[0] + ".json");
@@ -2483,6 +2554,30 @@ public class MediaServiceManager {
                     }
                 } catch (Throwable ignored) {}
             }
+        }
+    }
+
+    private void healServarrDatabase(String baseName) {
+        if (baseName == null) return;
+        try {
+            File dbFile = new File(TermuxConstants.TERMUX_HOME_DIR, ".config/" + baseName + "/" + baseName.toLowerCase(Locale.ROOT) + ".db");
+            if (!dbFile.exists()) return;
+            android.database.sqlite.SQLiteDatabase db = android.database.sqlite.SQLiteDatabase.openDatabase(
+                    dbFile.getAbsolutePath(), null, android.database.sqlite.SQLiteDatabase.OPEN_READWRITE);
+            if (db != null) {
+                try {
+                    db.execSQL("UPDATE Indexers SET Settings = REPLACE(Settings, '/indexers/torrentgalaxy/', '/indexers/torrentgalaxyclone/') WHERE Settings LIKE '%/indexers/torrentgalaxy/%';");
+                    db.execSQL("UPDATE Indexers SET Settings = REPLACE(Settings, 'https://limetorrents.lol/', 'https://www.limetorrents.lol/') WHERE Settings LIKE '%https://limetorrents.lol/%';");
+                    db.execSQL("UPDATE Indexers SET Settings = REPLACE(Settings, 'http://limetorrents.lol/', 'https://www.limetorrents.lol/') WHERE Settings LIKE '%http://limetorrents.lol/%';");
+                    Log.i(TAG, "[DatabaseHealer] Successfully healed " + baseName + " database indexers");
+                } catch (Throwable t) {
+                    Log.d(TAG, "[DatabaseHealer] Notice updating " + baseName + ": " + t.getMessage());
+                } finally {
+                    db.close();
+                }
+            }
+        } catch (Throwable t) {
+            Log.d(TAG, "[DatabaseHealer] Could not open " + baseName + " DB: " + t.getMessage());
         }
     }
 
@@ -4040,6 +4135,10 @@ public class MediaServiceManager {
                 for (File f : files) {
                     String name = f.getName();
                     String id = name.substring(0, name.length() - 5).trim();
+                    if ("torrentgalaxy".equalsIgnoreCase(id)) {
+                        f.delete();
+                        continue;
+                    }
                     if (!id.isEmpty() && !"ServerConfig".equalsIgnoreCase(id)) {
                         foundIds.add(id);
                     }
@@ -4051,7 +4150,7 @@ public class MediaServiceManager {
             foundIds.add("yts");
             foundIds.add("thepiratebay");
             foundIds.add("1337x");
-            foundIds.add("torrentgalaxy");
+            foundIds.add("torrentgalaxyclone");
             foundIds.add("limetorrents");
             foundIds.add("eztv");
         }
@@ -4099,18 +4198,18 @@ public class MediaServiceManager {
     }
 
     private void cleanupLegacyJackettAllIndexer(int port, String apiKey, String existing) {
-        if (existing == null || (!existing.contains("Jackett (All)") && !existing.contains("/indexers/all/"))) return;
+        if (existing == null || (!existing.contains("Jackett (All)") && !existing.contains("/indexers/all/") && !existing.contains("/indexers/torrentgalaxy/"))) return;
         try {
             org.json.JSONArray arr = new org.json.JSONArray(existing);
             for (int i = 0; i < arr.length(); i++) {
                 org.json.JSONObject item = arr.getJSONObject(i);
                 String name = item.optString("name", "");
                 String raw = item.toString();
-                if (name.contains("Jackett (All)") || raw.contains("/indexers/all/")) {
+                if (name.contains("Jackett (All)") || raw.contains("/indexers/all/") || raw.contains("/indexers/torrentgalaxy/")) {
                     int id = item.optInt("id", -1);
                     if (id > 0) {
                         httpDelete("http://127.0.0.1:" + port + getApiPrefix(port) + "/indexer/" + id + "?apiKey=" + apiKey);
-                        Log.i(TAG, "[AutoWire] Cleaned up obsolete Jackett aggregate indexer id " + id + " from port " + port);
+                        Log.i(TAG, "[AutoWire] Cleaned up obsolete Jackett indexer id " + id + " from port " + port);
                     }
                 }
             }
